@@ -131,11 +131,7 @@ def run_with_guardrails(user_message: str, session_id: str) -> str:
             })
             raise
 
-    # raw_response, tool_names = call_claude(user_message)
-    
-    # Required (capture arguments):
-    tool_args = getattr(block, 'input', {})
-    log_entry = {'tool_name': block.name, 'tool_args': tool_args}
+    raw_response, tool_names = call_claude(user_message)
 
     # Log metadata only — never the message or response text
     for tool_name in tool_names:
