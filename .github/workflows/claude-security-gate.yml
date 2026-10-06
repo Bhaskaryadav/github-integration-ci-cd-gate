@@ -126,7 +126,7 @@ jobs:
           bandit \
             --format json \
             --severity-level ${{ env.BANDIT_SEVERITY_LEVEL }} \
-            --confidence-level MEDIUM \
+            --confidence-level medium \
             --output ci_reports/bandit_results.json \
             ${{ steps.changed-files.outputs.changed_py_files }} || true
           
