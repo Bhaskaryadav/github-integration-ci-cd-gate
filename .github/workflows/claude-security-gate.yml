@@ -33,7 +33,7 @@ concurrency:
 
 env:
   MIN_COMPLIANCE_SCORE: 4
-  BANDIT_SEVERITY_LEVEL: medium
+  BANDIT_SEVERITY_LEVEL: MEDIUM
   # OpenRouter + Claude Code — https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration
   OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
   ANTHROPIC_BASE_URL: https://openrouter.ai/api
