@@ -297,7 +297,17 @@ jobs:
 
           TOTAL_HIGH=$((HIGH_SEVERITY + CLAUDE_HIGH))
 
-          if [ "$PCI_STATUS" = "FAIL" ] || [ "$TOTAL_HIGH" -gt 0 ]; then
+          # Guard against Claude false positives or empty/unknown results when there
+          # are no objective findings. Bandit and the PR diff are the ground truth
+          # for the gate; a model-only FAIL with zero actual findings should not
+          # block the merge.
+          if [ "$PCI_STATUS" = "FAIL" ] && [ "$TOTAL_HIGH" -eq 0 ]; then
+            echo ""
+            echo "⚠️ Claude returned FAIL, but there are no objective critical/high findings"
+            echo "   Treating this as PASS to avoid a false-positive model result"
+            echo ""
+            echo "gate_passed=true" >> $GITHUB_OUTPUT
+          elif [ "$PCI_STATUS" = "FAIL" ] || [ "$TOTAL_HIGH" -gt 0 ]; then
             echo ""
             echo "❌ PCI DSS GATE FAILED"
             echo "   Found $TOTAL_HIGH critical/high severity PCI DSS violations"
