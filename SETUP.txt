@@ -1,0 +1,4 @@
+Banking platform starter for Module 6 labs and Capstone.
+Ubuntu lab home: ~/Desktop/Project/
+Setup: ~/Desktop/Project/M6_P1_ClaudeCode_Setup/Guided_Activity.md
+Capstone: ~/Desktop/Project/M6_Capstone_Complete_Banking_Platform/Guided_Activity.md

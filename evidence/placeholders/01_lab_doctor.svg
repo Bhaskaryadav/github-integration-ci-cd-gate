@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="220" viewBox="0 0 720 220">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f4f6f8"/>
+    </linearGradient>
+  </defs>
+  <rect width="720" height="220" fill="url(#bg)" stroke="#c8d1dc" stroke-width="1"/>
+  <rect x="0" y="0" width="720" height="36" fill="#2c3e50"/>
+  <text x="24" y="24" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#ffffff" font-weight="600">EVIDENCE CAPTURE</text>
+  <text x="696" y="24" text-anchor="end" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#95a5a6">01_lab_doctor.png</text>
+  <text x="24" y="72" font-family="Segoe UI, Arial, sans-serif" font-size="18" fill="#1a252f" font-weight="600">Lab doctor — all PASS</text>
+  <text x="24" y="98" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#5d6d7e">Command / action</text>
+  <text x="24" y="118" font-family="Consolas, monospace" font-size="12" fill="#2e4053">python starter_files/lab_doctor.py</text>
+  <line x1="24" y1="140" x2="696" y2="140" stroke="#dce3eb" stroke-width="1"/>
+  <text x="24" y="162" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#7f8c8d">Replace this placeholder with a PNG screenshot of the terminal or IDE output.</text>
+  <text x="24" y="182" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#7f8c8d">Archive to evidence/ using the filename shown in the header.</text>
+</svg>

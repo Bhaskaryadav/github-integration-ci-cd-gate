@@ -1,0 +1,47 @@
+{
+  "model": "claude-sonnet-4-5",
+  "enableAllProjectMcpServers": true,
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "~anthropic/claude-sonnet-4.5",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "~anthropic/claude-opus-4.5",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "~anthropic/claude-haiku-4.5",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "~anthropic/claude-sonnet-4.5",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/hooks/bandit_scan.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/hooks/mcp_audit_logger.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "Bash",
+      "mcp__customer-info__*",
+      "mcp__banking-api__*",
+      "mcp__github__*"
+    ]
+  }
+}

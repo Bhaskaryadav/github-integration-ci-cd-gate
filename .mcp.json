@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "customer-info": {
+      "type": "stdio",
+      "command": "${CLAUDE_PROJECT_DIR:-.}/.venv/bin/python",
+      "args": ["${CLAUDE_PROJECT_DIR:-.}/mcp_servers/customer_info/server.py"]
+    },
+    "banking-api": {
+      "type": "sse",
+      "url": "http://localhost:8080/sse",
+      "headers": {
+        "X-API-Key": "${BANKING_MCP_API_KEY:-lab-banking-key-001}"
+      }
+    },
+    "github": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN:-}"
+      }
+    }
+  }
+}

@@ -1,0 +1,601 @@
+# =============================================================================
+# claude-security-gate.yml
+# GitHub Actions CI/CD Security Gate for Heritage National Bank Banking Platform
+# 
+# PURPOSE: Every pull request targeting main must pass:
+#   1. pci-dss-check   — Headless Claude Code scans for PCI DSS violations
+#   2. compliance-score — Claude-as-Judge rates compliance quality 1-5 (must be ≥4)
+#
+# SETUP REQUIRED:
+#   In your GitHub repository, go to Settings → Secrets and variables → Actions
+#   and add the following repository secrets:
+#   - OPENROUTER_API_KEY    : Your OpenRouter API key (sk-or-v1-...)
+#   - BANKING_API_KEY       : Banking platform MCP API key (optional)
+#
+# TRIGGER: Fires on every pull_request event targeting main branch
+# =============================================================================
+
+name: 🔒 Claude Security Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      # Only trigger on Python files and workflow changes
+      - '**.py'
+      - '.github/workflows/**.yml'
+
+# Cancel any in-progress run for the same PR to save resources
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  MIN_COMPLIANCE_SCORE: 4
+  BANDIT_SEVERITY_LEVEL: MEDIUM
+  # OpenRouter + Claude Code — https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration
+  OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+  ANTHROPIC_BASE_URL: https://openrouter.ai/api
+  ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
+  ANTHROPIC_API_KEY: ""
+  ANTHROPIC_DEFAULT_SONNET_MODEL: "~anthropic/claude-sonnet-latest"
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  # ===========================================================================
+  # JOB 1: PCI DSS Violation Check using Headless Claude Code
+  # Scans changed Python files for PCI DSS violations using Claude Code in
+  # non-interactive (headless) mode with stream-json output for CI parsing.
+  # ===========================================================================
+  pci-dss-check:
+    name: 🔍 PCI DSS Violation Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # ── Step 1: Check out the repository ──────────────────────────────────
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history to enable accurate diff comparison
+          fetch-depth: 0
+
+      # ── Step 2: Set up Python ─────────────────────────────────────────────
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── Step 3: Install Python dependencies ──────────────────────────────
+      - name: 📦 Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install bandit[toml]>=1.7.0
+          # Install project requirements if they exist
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      # ── Step 4: Install Node.js (required for Claude Code CLI) ───────────
+      - name: 🟢 Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ── Step 5: Install Claude Code CLI ──────────────────────────────────
+      - name: 🤖 Install Claude Code CLI
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+      # ── Step 6: Get list of changed Python files in this PR ───────────────
+      - name: 📋 Identify changed Python files
+        id: changed-files
+        run: |
+          # Get Python files changed between base branch and this PR
+          CHANGED_PY_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- '*.py' | tr '\n' ' ')
+          echo "changed_py_files=$CHANGED_PY_FILES" >> $GITHUB_OUTPUT
+          echo "📝 Changed Python files: $CHANGED_PY_FILES"
+          
+          if [ -z "$CHANGED_PY_FILES" ]; then
+            echo "no_python_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "no_python_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ── Step 7: Skip if no Python files changed ───────────────────────────
+      - name: ⏭️ Skip if no Python changes
+        if: steps.changed-files.outputs.no_python_changes == 'true'
+        run: |
+          echo "✅ No Python files changed in this PR. PCI DSS check skipped."
+          exit 0
+
+      # ── Step 8: Run bandit baseline scan on changed files ─────────────────
+      - name: 🔒 Run bandit baseline scan
+        if: steps.changed-files.outputs.no_python_changes == 'false'
+        id: bandit-scan
+        run: |
+          mkdir -p ci_reports
+          
+          echo "🔍 Running bandit on: ${{ steps.changed-files.outputs.changed_py_files }}"
+          
+          # Run bandit with JSON output
+          bandit \
+            --format json \
+            --severity-level ${{ env.BANDIT_SEVERITY_LEVEL }} \
+            --confidence-level MEDIUM \
+            --output ci_reports/bandit_results.json \
+            ${{ steps.changed-files.outputs.changed_py_files }} || true
+          
+          # Count findings by severity
+          CRITICAL_COUNT=$(python3 -c "
+          import json
+          with open('ci_reports/bandit_results.json') as f:
+              data = json.load(f)
+          results = data.get('results', [])
+          high = sum(1 for r in results if r['issue_severity'] in ['CRITICAL', 'HIGH'])
+          medium = sum(1 for r in results if r['issue_severity'] == 'MEDIUM')
+          print(f'{high},{medium},{len(results)}')
+          " 2>/dev/null || echo "0,0,0")
+          
+          HIGH_SEVERITY=$(echo $CRITICAL_COUNT | cut -d',' -f1)
+          MEDIUM_SEVERITY=$(echo $CRITICAL_COUNT | cut -d',' -f2)
+          TOTAL=$(echo $CRITICAL_COUNT | cut -d',' -f3)
+          
+          echo "high_severity_count=$HIGH_SEVERITY" >> $GITHUB_OUTPUT
+          echo "medium_severity_count=$MEDIUM_SEVERITY" >> $GITHUB_OUTPUT
+          echo "total_findings=$TOTAL" >> $GITHUB_OUTPUT
+          
+          echo "📊 Bandit Results:"
+          echo "  - Critical/High: $HIGH_SEVERITY"
+          echo "  - Medium:        $MEDIUM_SEVERITY"
+          echo "  - Total:         $TOTAL"
+        continue-on-error: true
+
+      # ── Step 9: Run Claude Code headless PCI DSS analysis ─────────────────
+      - name: "🤖 Claude Code: PCI DSS violation analysis"
+        if: steps.changed-files.outputs.no_python_changes == 'false'
+        id: claude-pci-check
+        run: |
+          mkdir -p ci_reports
+          
+          # Create the diff file for Claude Code to analyze
+          git diff origin/${{ github.base_ref }}...HEAD -- '*.py' > ci_reports/pr_diff.patch
+          
+          # Prepare the PCI DSS analysis prompt
+          PCI_PROMPT="You are a PCI DSS compliance specialist reviewing a pull request for a banking platform.
+          
+          Analyze the following git diff for PCI DSS violations. Focus on:
+          1. Plaintext cardholder data in logs or outputs (PCI DSS Req 3)
+          2. Hardcoded credentials, API keys, or passwords (PCI DSS Req 6)
+          3. Missing authentication on banking API endpoints (PCI DSS Req 8)
+          4. Insufficient audit logging for financial operations (PCI DSS Req 10)
+          5. Input validation gaps that could allow SQL injection or command injection (PCI DSS Req 6)
+          6. Unencrypted transmission of sensitive data (PCI DSS Req 4)
+          
+          Provide a structured JSON response with:
+          {
+            \"pci_dss_violations\": [
+              {
+                \"severity\": \"CRITICAL|HIGH|MEDIUM|LOW\",
+                \"requirement\": \"PCI DSS Req X.X\",
+                \"description\": \"Description of violation\",
+                \"file\": \"filename\",
+                \"line_reference\": \"approximate line or code snippet\",
+                \"remediation\": \"How to fix\"
+              }
+            ],
+            \"overall_pci_status\": \"PASS|FAIL\",
+            \"critical_high_count\": 0,
+            \"summary\": \"Brief summary\"
+          }
+          
+          DIFF TO ANALYZE:
+          $(cat ci_reports/pr_diff.patch | head -500)
+          
+          Respond with ONLY valid JSON, no other text."
+          
+          # Run Claude Code in headless mode.
+          # NOTE: use --output-format json (a single JSON envelope with the
+          # final answer in the "result" field), NOT stream-json. Claude
+          # Code's stream-json events are its own SDK message types
+          # (system/assistant/user/result) — they are never the raw
+          # Anthropic Messages API SSE event named "content_block_delta"
+          # (that shape only shows up nested under a "stream_event" type,
+          # and only when --include-partial-messages is also passed).
+          # Filtering for "content_block_delta" here always yields an empty
+          # string, which silently collapses this whole check to defaults.
+          claude \
+            --model claude-haiku-4-5 \
+            --output-format json \
+            -p "$PCI_PROMPT" \
+            2>/dev/null \
+            | python3 -c "
+          import sys, json
+
+          raw = sys.stdin.read()
+          try:
+              envelope = json.loads(raw)
+              result_text = (envelope.get('result') or '').strip()
+          except json.JSONDecodeError:
+              result_text = ''
+
+          # Claude sometimes wraps JSON in a markdown code fence even when
+          # asked not to — strip it before validating.
+          if result_text.startswith('\`\`\`'):
+              result_text = result_text.split('\n', 1)[1] if '\n' in result_text else ''
+              if result_text.endswith('\`\`\`'):
+                  result_text = result_text.rsplit('\`\`\`', 1)[0]
+              result_text = result_text.strip()
+
+          try:
+              json.loads(result_text)
+              print(result_text)
+          except json.JSONDecodeError:
+              print(json.dumps({'overall_pci_status': 'ERROR', 'critical_high_count': 0, 'summary': 'Claude Code returned non-JSON output'}))
+          " > ci_reports/claude_pci_analysis.json 2>/dev/null || echo '{"overall_pci_status": "ERROR", "critical_high_count": 0, "summary": "Claude Code analysis failed"}' > ci_reports/claude_pci_analysis.json
+          
+          # Extract key metrics
+          PCI_STATUS=$(python3 -c "
+          import json
+          try:
+              with open('ci_reports/claude_pci_analysis.json') as f:
+                  data = json.load(f)
+              print(data.get('overall_pci_status', 'UNKNOWN'))
+          except:
+              print('UNKNOWN')
+          ")
+          
+          CLAUDE_HIGH_COUNT=$(python3 -c "
+          import json
+          try:
+              with open('ci_reports/claude_pci_analysis.json') as f:
+                  data = json.load(f)
+              print(data.get('critical_high_count', 0))
+          except:
+              print(0)
+          ")
+          
+          echo "pci_status=$PCI_STATUS" >> $GITHUB_OUTPUT
+          echo "claude_high_count=$CLAUDE_HIGH_COUNT" >> $GITHUB_OUTPUT
+          
+          echo "🤖 Claude Code PCI DSS Analysis:"
+          echo "  Status: $PCI_STATUS"
+          echo "  Critical/High Findings: $CLAUDE_HIGH_COUNT"
+          cat ci_reports/claude_pci_analysis.json | python3 -m json.tool 2>/dev/null || cat ci_reports/claude_pci_analysis.json
+        continue-on-error: true
+
+      # ── Step 10: Combine bandit + Claude analysis and set gate result ──────
+      - name: 📊 Evaluate PCI DSS gate result
+        if: steps.changed-files.outputs.no_python_changes == 'false'
+        id: pci-gate
+        run: |
+          HIGH_SEVERITY="${{ steps.bandit-scan.outputs.high_severity_count }}"
+          CLAUDE_HIGH="${{ steps.claude-pci-check.outputs.claude_high_count }}"
+          PCI_STATUS="${{ steps.claude-pci-check.outputs.pci_status }}"
+          
+          echo "🔍 PCI DSS Gate Evaluation:"
+          echo "  Bandit High/Critical:   $HIGH_SEVERITY"
+          echo "  Claude High/Critical:   $CLAUDE_HIGH"
+          echo "  Claude PCI Status:      $PCI_STATUS"
+          
+          TOTAL_HIGH=$((${HIGH_SEVERITY:-0} + ${CLAUDE_HIGH:-0}))
+          
+          if [ "$PCI_STATUS" = "FAIL" ] || [ "$TOTAL_HIGH" -gt 0 ]; then
+            echo ""
+            echo "❌ PCI DSS GATE FAILED"
+            echo "   Found $TOTAL_HIGH critical/high severity PCI DSS violations"
+            echo "   All critical and high severity issues must be resolved before merging"
+            echo ""
+            echo "gate_passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo ""
+            echo "✅ PCI DSS GATE PASSED"
+            echo "   No critical or high severity PCI DSS violations found"
+            echo "gate_passed=true" >> $GITHUB_OUTPUT
+          fi
+
+      # ── Step 11: Upload analysis artifacts ───────────────────────────────
+      - name: 📤 Upload PCI DSS reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pci-dss-reports-pr-${{ github.event.pull_request.number }}
+          path: ci_reports/
+          retention-days: 30
+
+  # ===========================================================================
+  # JOB 2: Claude-as-Judge Compliance Quality Scoring
+  # Scores the PR on a 1-5 compliance quality rubric.
+  # Gate fails if score < MIN_COMPLIANCE_SCORE (default: 4).
+  # ===========================================================================
+  compliance-scoring:
+    name: 🏛️ Compliance Quality Score (Claude-as-Judge)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    # Run independently of pci-dss-check so both jobs run even if one fails
+    needs: []
+
+    steps:
+      # ── Step 1: Check out the repository ──────────────────────────────────
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Step 2: Set up Python ─────────────────────────────────────────────
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── Step 3: Set up Node.js for Claude Code ────────────────────────────
+      - name: 🟢 Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ── Step 4: Install Claude Code CLI ──────────────────────────────────
+      - name: 🤖 Install Claude Code CLI
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+      # ── Step 5: Get PR diff ───────────────────────────────────────────────
+      - name: 📋 Extract PR changes
+        id: pr-changes
+        run: |
+          mkdir -p ci_reports
+          
+          # Get the diff
+          git diff origin/${{ github.base_ref }}...HEAD > ci_reports/full_diff.patch
+          
+          # Get PR metadata
+          DIFF_LINES=$(wc -l < ci_reports/full_diff.patch)
+          echo "diff_lines=$DIFF_LINES" >> $GITHUB_OUTPUT
+          echo "📊 PR diff: $DIFF_LINES lines"
+
+      # ── Step 6: Claude-as-Judge compliance scoring ────────────────────────
+      - name: "🏛️ Claude-as-Judge: Score compliance quality"
+        id: compliance-judge
+        run: |
+          mkdir -p ci_reports
+          
+          # The Claude-as-Judge rubric for BFSI banking platform compliance
+          JUDGE_PROMPT="You are a senior banking compliance officer acting as a code review judge.
+          
+          Score this pull request on a 1-5 compliance quality rubric for a PCI DSS-regulated banking platform.
+          
+          SCORING RUBRIC:
+          
+          5/5 - EXCELLENT:
+          - All sensitive data properly masked/encrypted
+          - Complete audit logging for all financial operations  
+          - Input validation on all user-provided data
+          - No hardcoded credentials or secrets
+          - Proper error handling without information leakage
+          - Code follows all CLAUDE.md PCI DSS standards
+          
+          4/5 - GOOD (MEETS GATE THRESHOLD):
+          - Sensitive data handling is correct
+          - Audit logging present for key operations
+          - Minor improvements possible but no compliance risks
+          - Follows most PCI DSS standards from CLAUDE.md
+          
+          3/5 - ADEQUATE (BELOW THRESHOLD — GATE FAILS):
+          - Some gaps in data protection
+          - Incomplete audit trail
+          - Some missing input validation
+          - Needs remediation before merging
+          
+          2/5 - POOR (GATE FAILS):
+          - Significant compliance gaps
+          - Missing required security controls
+          - High risk of PCI DSS violation in production
+          
+          1/5 - CRITICAL FAILURE (GATE FAILS):
+          - Active PCI DSS violations
+          - Data exposed or security controls bypassed
+          - Must not be merged under any circumstances
+          
+          PULL REQUEST METADATA:
+          - PR #${{ github.event.pull_request.number }}
+          - Title: ${{ github.event.pull_request.title }}
+          - Author: ${{ github.event.pull_request.user.login }}
+          
+          CODE CHANGES TO REVIEW:
+          $(cat ci_reports/full_diff.patch | head -400)
+          
+          Respond with ONLY this JSON structure, no other text:
+          {
+            \"score\": <integer 1-5>,
+            \"grade\": \"EXCELLENT|GOOD|ADEQUATE|POOR|CRITICAL_FAILURE\",
+            \"gate_decision\": \"PASS|FAIL\",
+            \"strengths\": [\"strength 1\", \"strength 2\"],
+            \"improvements_required\": [\"improvement 1\"],
+            \"improvements_suggested\": [\"suggestion 1\"],
+            \"pci_dss_notes\": \"Brief note on PCI DSS compliance\",
+            \"reviewer_summary\": \"2-3 sentence summary for PR author\"
+          }"
+          
+          # Run Claude-as-Judge in headless mode.
+          # NOTE: --output-format json returns one JSON envelope with the
+          # final answer in "result" — see the note above the PCI check
+          # step for why stream-json + content_block_delta always produced
+          # an empty result_text (and therefore score 0 / grade UNKNOWN).
+          claude \
+            --model claude-sonnet-4-5 \
+            --output-format json \
+            -p "$JUDGE_PROMPT" \
+            2>/dev/null \
+            | python3 -c "
+          import sys, json
+
+          raw = sys.stdin.read()
+          try:
+              envelope = json.loads(raw)
+              result_text = (envelope.get('result') or '').strip()
+          except json.JSONDecodeError:
+              result_text = ''
+
+          if result_text.startswith('\`\`\`'):
+              result_text = result_text.split('\n', 1)[1] if '\n' in result_text else ''
+              if result_text.endswith('\`\`\`'):
+                  result_text = result_text.rsplit('\`\`\`', 1)[0]
+              result_text = result_text.strip()
+
+          try:
+              json.loads(result_text)
+              print(result_text)
+          except json.JSONDecodeError:
+              print(json.dumps({'score': 0, 'grade': 'ERROR', 'gate_decision': 'FAIL', 'reviewer_summary': 'Claude Code returned non-JSON output'}))
+          " > ci_reports/compliance_score.json 2>/dev/null \
+            || echo '{\"score\": 0, \"grade\": \"ERROR\", \"gate_decision\": \"FAIL\", \"reviewer_summary\": \"Scoring failed — manual review required\"}' > ci_reports/compliance_score.json
+          
+          # Extract score and decision
+          SCORE=$(python3 -c "
+          import json
+          try:
+              with open('ci_reports/compliance_score.json') as f:
+                  data = json.load(f)
+              print(data.get('score', 0))
+          except:
+              print(0)
+          ")
+          
+          GRADE=$(python3 -c "
+          import json
+          try:
+              with open('ci_reports/compliance_score.json') as f:
+                  data = json.load(f)
+              print(data.get('grade', 'UNKNOWN'))
+          except:
+              print('UNKNOWN')
+          ")
+          
+          SUMMARY=$(python3 -c "
+          import json
+          try:
+              with open('ci_reports/compliance_score.json') as f:
+                  data = json.load(f)
+              print(data.get('reviewer_summary', 'No summary available'))
+          except:
+              print('Scoring failed')
+          ")
+          
+          echo "compliance_score=$SCORE" >> $GITHUB_OUTPUT
+          echo "compliance_grade=$GRADE" >> $GITHUB_OUTPUT
+          
+          echo "🏛️ Claude-as-Judge Results:"
+          echo "  Score:    $SCORE / 5"
+          echo "  Grade:    $GRADE"
+          echo "  Summary:  $SUMMARY"
+          echo ""
+          cat ci_reports/compliance_score.json | python3 -m json.tool 2>/dev/null || true
+        continue-on-error: true
+
+      # ── Step 7: Post score as PR comment ──────────────────────────────────
+      - name: 💬 Post compliance score comment to PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const score = '${{ steps.compliance-judge.outputs.compliance_score }}';
+            const grade = '${{ steps.compliance-judge.outputs.compliance_grade }}';
+            const minScore = ${{ env.MIN_COMPLIANCE_SCORE }};
+            const passed = parseInt(score) >= minScore;
+            const emoji = passed ? '✅' : '❌';
+            
+            const scoreBar = '🟦'.repeat(parseInt(score)) + '⬜'.repeat(5 - parseInt(score));
+            
+            const body = `## 🏛️ Claude-as-Judge Compliance Score
+            
+            ${emoji} **Score: ${score}/5** ${scoreBar}
+            
+            **Grade:** ${grade}  
+            **Gate Status:** ${passed ? '✅ PASSED' : '❌ FAILED'} (threshold: ${minScore}/5)
+            
+            > *Scored by Claude Sonnet using the Heritage National Bank PCI DSS compliance rubric.*  
+            > *See the full compliance report in the [Actions artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}).*
+            
+            ${passed ? '✅ This PR meets the compliance quality threshold and may proceed to merge (pending PCI DSS check).' : `⚠️ This PR scored below the minimum threshold of ${minScore}/5. Please address compliance improvements before merging.`}
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      # ── Step 8: Enforce compliance gate ───────────────────────────────────
+      - name: 🚦 Enforce compliance score gate
+        id: score-gate
+        run: |
+          SCORE="${{ steps.compliance-judge.outputs.compliance_score }}"
+          MIN_SCORE="${{ env.MIN_COMPLIANCE_SCORE }}"
+          
+          echo "📊 Compliance Score Gate:"
+          echo "  Score:     $SCORE / 5"
+          echo "  Minimum:   $MIN_SCORE / 5"
+          
+          if [ -z "$SCORE" ] || [ "$SCORE" -lt "$MIN_SCORE" ] 2>/dev/null; then
+            echo ""
+            echo "❌ COMPLIANCE GATE FAILED"
+            echo "   Score $SCORE is below the minimum threshold of $MIN_SCORE"
+            echo "   Improve compliance quality and re-submit the PR"
+            exit 1
+          else
+            echo ""
+            echo "✅ COMPLIANCE GATE PASSED"
+            echo "   Score $SCORE meets the minimum threshold of $MIN_SCORE"
+          fi
+
+      # ── Step 9: Upload scoring artifacts ─────────────────────────────────
+      - name: 📤 Upload compliance scoring reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compliance-score-pr-${{ github.event.pull_request.number }}
+          path: ci_reports/
+          retention-days: 30
+
+  # ===========================================================================
+  # JOB 3: Gate Summary — Aggregates results from both checks
+  # Both pci-dss-check AND compliance-scoring must pass for the PR to merge.
+  # ===========================================================================
+  gate-summary:
+    name: 🚦 Security Gate Summary
+    runs-on: ubuntu-latest
+    needs: [pci-dss-check, compliance-scoring]
+    if: always()
+
+    steps:
+      - name: 📊 Report gate outcome
+        run: |
+          PCI_RESULT="${{ needs.pci-dss-check.result }}"
+          SCORE_RESULT="${{ needs.compliance-scoring.result }}"
+          
+          echo "=============================================="
+          echo "  🔒 Heritage National Bank Security Gate"
+          echo "=============================================="
+          echo ""
+          echo "  PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+          echo ""
+          echo "  PCI DSS Check:        $([ '$PCI_RESULT' = 'success' ] && echo '✅ PASSED' || echo '❌ FAILED')"
+          echo "  Compliance Scoring:   $([ '$SCORE_RESULT' = 'success' ] && echo '✅ PASSED' || echo '❌ FAILED')"
+          echo ""
+          
+          if [ "$PCI_RESULT" = "success" ] && [ "$SCORE_RESULT" = "success" ]; then
+            echo "  ✅ ALL GATES PASSED — PR is eligible for merge"
+            echo "=============================================="
+          else
+            echo "  ❌ GATE FAILED — PR cannot be merged"
+            echo "     Fix all issues and push a new commit"
+            echo "=============================================="
+            exit 1
+          fi
